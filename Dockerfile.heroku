@@ -68,10 +68,7 @@ RUN opengrok-indexer \
 
 RUN echo "#!/bin/sh" > /start.sh \
     && echo "cd /usr/local/tomcat" >> /start.sh \
-    && echo "ls -l /usr/local/tomcat" >> /start.sh \
-    && echo "ls -l /usr/local/tomcat/webapps" >> /start.sh \
-    && echo "ls -l /usr/local/tomcat/webapps/ROOT" >> /start.sh \
-    && echo "ls -l /usr/local/tomcat/webapps/source" >> /start.sh \
+    && echo "rm -rf /usr/local/tomcat/webapps/ROOT" >> /start.sh \
     && echo "sed -i -e 's/Connector port=\"8080\"/Connector port=\"\${httpPort}\"/' conf/server.xml" >> /start.sh \
     && echo "JAVA_OPTS=\"-DhttpPort=\$PORT\" catalina.sh run" >> /start.sh
 
