@@ -70,7 +70,7 @@ RUN echo "#!/bin/sh" > /start.sh \
     && echo "cd /usr/local/tomcat" >> /start.sh \
     && echo "rm -rf /usr/local/tomcat/webapps/ROOT" >> /start.sh \
     && echo "sed -i -e 's/Connector port=\"8080\"/Connector port=\"\${httpPort}\"/' conf/server.xml" >> /start.sh \
-    && echo "JAVA_OPTS=\"-DhttpPort=\$PORT\" catalina.sh run" >> /start.sh
+    && echo "JAVA_OPTS=\"-Xms256m -Xmx512m -DhttpPort=\$PORT\" catalina.sh run" >> /start.sh
 
 WORKDIR $CATALINA_HOME
 CMD ["sh", "/start.sh"]
