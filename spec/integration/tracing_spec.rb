@@ -1,88 +1,59 @@
 require 'spec_helper'
-require 'securerandom'
 require 'tmpdir'
 
-# https://github.com/microsoft/playwright/blob/master/tests/chromium/tracing.spec.ts
-# https://github.com/microsoft/playwright-python/blob/master/tests/async/test_tracing.py
-RSpec.describe 'tracing' do
-  before { skip unless chromium? }
-
-  let(:output_trace_file) { "trace-#{SecureRandom.hex(8)}.json" }
+RSpec.describe 'Tracing', skip: Puppeteer.env.firefox? do
+  let(:output_file) { "trace-#{SecureRandom.hex(8)}.json" }
   after do
-    File.delete(output_trace_file) if File.exist?(output_trace_file)
+    File.delete(output_file) if File.exist?(output_file)
   end
 
   it 'should output a trace', sinatra: true do
-    with_page do |page|
-      browser.start_tracing(page: page, screenshots: true, path: output_trace_file)
-      page.goto("#{server_prefix}/grid.html")
-      browser.stop_tracing
-      expect(File.exist?(output_trace_file)).to eq(true)
-    end
+    page.tracing.start(screenshots: true, path: output_file)
+    page.goto("#{server_prefix}/grid.html")
+    page.tracing.stop
+    expect(File.exist?(output_file)).to eq(true)
   end
 
-  it 'should create directories as needed', sinatra: true do
-    with_page do |page|
-      Dir.mktmpdir do |dir|
-        file_path = File.join(dir, 'these', 'are', 'directories', output_trace_file)
-        browser.start_tracing(page: page, screenshots: true, path: file_path)
-        page.goto("#{server_prefix}/grid.html")
-        browser.stop_tracing
-        expect(File.exist?(file_path)).to eq(true)
-      end
-    end
-  end
+  it 'should run with custom categories if provided' do
+    page.tracing.start(
+      path: output_file,
+      categories: ['disabled-by-default-v8.cpu_profiler.hires'],
+    )
+    page.tracing.stop
 
-  it 'should run with custom categories if provided', sinatra: true do
-    with_page do |page|
-      browser.start_tracing(
-        page: page,
-        path: output_trace_file,
-        categories: ['disabled-by-default-v8.cpu_profiler.hires'],
-      )
-      page.goto("#{server_prefix}/grid.html")
-      browser.stop_tracing
-
-      trace_json = JSON.parse(File.read(output_trace_file))
-      expect(trace_json.dig('metadata', 'trace-config')).to include('disabled-by-default-v8.cpu_profiler.hires')
-    end
+    trace_json = JSON.parse(File.read(output_file))
+    expect(trace_json.dig('metadata', 'trace-config')).to include('disabled-by-default-v8.cpu_profiler.hires')
   end
 
   it 'should throw if tracing on two pages' do
-    with_page do |page|
-      browser.start_tracing(page: page)
-
-      new_page = browser.new_page
-      expect {
-          browser.start_tracing(page: new_page)
-      }.to raise_error(/Cannot start recording trace while already recording trace./)
-    end
+    page.tracing.start(path: output_file)
+    new_page = page.browser.new_page
+    expect { new_page.tracing.start(path: output_file) }.to raise_error(/Tracing has already been started/)
   end
 
   it 'should return a buffer', sinatra: true do
-    with_page do |page|
-      browser.start_tracing(page: page, screenshots: true, path: output_trace_file)
-      page.goto("#{server_prefix}/grid.html")
-      trace = browser.stop_tracing
-      expect(trace).to eq(File.read(output_trace_file))
-    end
+    page.tracing.start(screenshots: true, path: output_file)
+    page.goto("#{server_prefix}/grid.html")
+    trace = page.tracing.stop
+    expect(trace).to eq(File.read(output_file))
   end
 
   it 'should work without options', sinatra: true do
-    with_page do |page|
-      browser.start_tracing(page: page)
-      page.goto("#{server_prefix}/grid.html")
-      trace = browser.stop_tracing
-      expect(trace).to be_a(String)
-    end
+    page.tracing.start
+    page.goto("#{server_prefix}/grid.html")
+    trace = page.tracing.stop
+    expect(trace.length).to be > 1000
   end
 
   it 'should support a buffer without a path', sinatra: true do
-    with_page do |page|
-      browser.start_tracing(page: page, screenshots: true)
-      page.goto("#{server_prefix}/grid.html")
-      trace = browser.stop_tracing
-      expect(trace).to include('screenshot')
-    end
+    page.tracing.start(screenshots: true)
+    page.goto("#{server_prefix}/grid.html")
+    trace = page.tracing.stop
+    expect(trace).to include('screenshot')
+  end
+
+  it 'should properly fail if readProtocolStream errors out' do
+    page.tracing.start(path: File.expand_path(__dir__))
+    expect { page.tracing.stop }.to raise_error(/Is a directory/)
   end
 end

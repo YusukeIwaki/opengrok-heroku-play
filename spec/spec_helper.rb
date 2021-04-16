@@ -1,8 +1,31 @@
-# frozen_string_literal: true
-
 require 'bundler/setup'
-require 'playwright'
-require 'timeout'
+require 'puppeteer'
+require 'rollbar'
+
+Rollbar.configure do |config|
+  if ENV['ROLLBAR_ACCESS_TOKEN']
+    config.access_token = ENV['ROLLBAR_ACCESS_TOKEN']
+  else
+    config.enabled = false
+  end
+end
+
+module PuppeteerEnvExtension
+  # @return [String] chrome, firefox
+  def product
+    (%w(chrome firefox) & [ENV['PUPPETEER_PRODUCT_RSPEC']]).first || 'chrome'
+  end
+
+  def chrome?
+    product == 'chrome'
+  end
+
+  def firefox?
+    product == 'firefox'
+  end
+end
+
+Puppeteer::Env.include(PuppeteerEnvExtension)
 
 RSpec.configure do |config|
   # Enable flags like --only-failures and --next-failure
@@ -11,87 +34,106 @@ RSpec.configure do |config|
   # Disable RSpec exposing methods globally on `Module` and `main`
   config.disable_monkey_patching!
 
-  config.expect_with :rspec do |c|
+  config.expect_with(:rspec) do |c|
     c.syntax = :expect
   end
 
-  config.define_derived_metadata(file_path: %r(/spec/development/generate_api/)) do |metadata|
-    metadata[:type] = :generate_api
+  launch_options = {
+    product: Puppeteer.env.product,
+    executable_path: ENV['PUPPETEER_EXECUTABLE_PATH_RSPEC'],
+  }.compact
+  if Puppeteer.env.debug? && !Puppeteer.env.ci?
+    launch_options[:headless] = false
   end
 
-  config.before(:context, type: :generate_api) do
-    require './development/generate_api'
+  config.around(:each, type: :puppeteer) do |example|
+    if ENV['PENDING_CHECK'] && !example.metadata[:pending]
+      skip 'Pending check mode'
+    end
+
+    @default_launch_options = launch_options
+    @puppeteer_headless = launch_options[:headless] != false
+
+    # if example.metadata[:disable_web_security]
+    #   # Enable cross-origin access for cookies_spec
+    #   # ref: https://github.com/puppeteer/puppeteer/issues/4053
+    #   launch_options[:args] = [
+    #     '--disable-web-security',
+    #     '--disable-features=IsolateOrigins,site-per-process',
+    #   ]
+    # end
+
+    if example.metadata[:puppeteer].to_s == 'browser'
+      Puppeteer.launch(**launch_options) do |browser|
+        @puppeteer_browser = browser
+        example.run
+      end
+    elsif example.metadata[:browser_context].to_s == 'incognito'
+      Puppeteer.launch(**launch_options) do |browser|
+        context = browser.create_incognito_browser_context
+        @puppeteer_page = context.new_page
+        begin
+          example.run
+        ensure
+          @puppeteer_page.close
+        end
+      end
+    else
+      if Puppeteer.env.firefox?
+        Puppeteer.launch(**launch_options) do |browser|
+          # Firefox often fails page.focus by reusing the page with 'browser.pages.first'.
+          # So create new page for each spec.
+          @puppeteer_page = browser.new_page
+          begin
+            example.run
+          ensure
+            @puppeteer_page.close
+          end
+        end
+      else
+        Puppeteer.launch(**launch_options) do |browser|
+          @puppeteer_page = browser.pages.first || browser.new_page
+          example.run
+        end
+      end
+    end
+  end
+
+  # Unit test doesn't connect to internet. No need to wait for 30sec. Set it to 7.5sec.
+  config.before(:each, type: :puppeteer) do
+    stub_const("Puppeteer::TimeoutSettings::DEFAULT_TIMEOUT", 7500)
+  end
+
+  # Every browser automation test case should spend less than 15sec.
+  if Puppeteer.env.ci?
+    config.around(:each, type: :puppeteer) do |example|
+      Timeout.timeout(15) { example.run }
+    end
   end
 
   config.define_derived_metadata(file_path: %r(/spec/integration/)) do |metadata|
-    metadata[:type] = :integration
+    metadata[:type] = :puppeteer
   end
 
-  browser_type = :chromium
-  BROWSER_TYPES = %i(chromium webkit firefox)
-  if BROWSER_TYPES.include?(ENV['BROWSER']&.to_sym)
-    browser_type = ENV['BROWSER'].to_sym
-  end
-
-  config.around(:each, type: :integration) do |example|
-    @playwright_browser_type = browser_type
-
-    # Every integration test case should spend less than 15sec, in CI.
-    params = {
-      playwright_cli_executable_path: ENV['PLAYWRIGHT_CLI_EXECUTABLE_PATH'],
-      timeout: ENV['CI'] ? 15 : nil,
-    }
-    Playwright.create(**params) do |playwright|
-      @playwright_playwright = playwright
-
-      playwright.send(@playwright_browser_type).launch do |browser|
-        @playwright_browser = browser
-        example.run
-      end
-    end
-  end
-
-  module IntegrationTestCaseMethods
-    def playwright
-      @playwright_playwright or raise NoMethodError.new('undefined method "playwright"')
+  module PuppeteerMethods
+    def headless?
+      @puppeteer_headless
     end
 
     def browser
-      @playwright_browser or raise NoMethodError.new('undefined method "browser"')
+      @puppeteer_browser or raise NoMethodError.new('undefined method "browser" (If you intended to use puppeteer#browser, you have to add `puppeteer: :browser` to metadata.)')
     end
 
-    def with_context(**kwargs, &block)
-      unless @playwright_browser
-        raise '@playwright_browser must not be null.'
-      end
-      context = @playwright_browser.new_context(**kwargs)
-      begin
-        block.call(context)
-      ensure
-        context.close
-      end
+    def page
+      @puppeteer_page or raise NoMethodError.new('undefined method "page"')
     end
 
-    def with_page(**kwargs, &block)
-      unless @playwright_browser
-        raise '@playwright_browser must not be null.'
-      end
-      page = @playwright_browser.new_page(**kwargs)
-      begin
-        block.call(page)
-      ensure
-        page.close
-      end
+    def default_launch_options
+      @default_launch_options or raise NoMethodError.new('undefined method "default_launch_options"')
     end
   end
-  BROWSER_TYPES.each do |type|
-    IntegrationTestCaseMethods.define_method("#{type}?") { @playwright_browser_type == type }
-  end
-  config.include IntegrationTestCaseMethods, type: :integration
+  config.include PuppeteerMethods, type: :puppeteer
 
-  #   it 'can connect to /awesome', sinatra: true do
-  #     url = "#{server_prefix}/awesome" # => http://localhost:4567/awesome
-  #
   test_with_sinatra = Module.new do
     attr_reader :server_prefix, :server_cross_process_prefix, :server_empty_page, :sinatra
   end
@@ -99,47 +141,9 @@ RSpec.configure do |config|
   config.around(sinatra: true) do |example|
     require 'net/http'
     require 'sinatra/base'
+    require 'timeout'
 
-    sinatra_app = Class.new(Sinatra::Base) do
-      # Change the priority of static file routing.
-      # Original impl is here:
-      # https://github.com/sinatra/sinatra/blob/v2.1.0/lib/sinatra/base.rb
-      #
-      # Dispatch a request with error handling.
-      def dispatch!
-        # Avoid passing frozen string in force_encoding
-        @params.merge!(@request.params).each do |key, val|
-          next unless val.respond_to?(:force_encoding)
-          val = val.dup if val.frozen?
-          @params[key] = force_encoding(val)
-        end
-
-        invoke do
-          filter! :before do
-            @pinned_response = !@response['Content-Type'].nil?
-          end
-          route!
-          static! if settings.static? && (request.get? || request.head?)
-
-          route_missing_really!
-        end
-      rescue ::Exception => boom
-        invoke { handle_exception!(boom) }
-      ensure
-        begin
-          filter! :after unless env['sinatra.static_file']
-        rescue ::Exception => boom
-          invoke { handle_exception!(boom) } unless @env['sinatra.error']
-        end
-      end
-
-      alias_method :route_missing_really!, :route_missing
-
-      def route_missing
-        # Do nothing when called in #route!
-      end
-    end
-
+    sinatra_app = Sinatra.new
     sinatra_app.disable(:protection)
     sinatra_app.set(:public_folder, File.join(__dir__, 'assets'))
     @server_prefix = "http://localhost:4567"
@@ -169,15 +173,26 @@ RSpec.configure do |config|
       sinatra_app.quit!
     end
   end
+end
 
-  # Every integration test case should spend less than 20sec, in CI.
-  #
-  # Essentially this timeout is not needed.
-  # However socketry/async doesn't raise StandardError, and hangs...!
-  # Workaround to do with it...
-  if ENV['CI']
-    config.around(:each, type: :integration) do |example|
-      Timeout.timeout(20) { example.run }
+module ItFailsFirefox
+  def it_fails_firefox(*args, **kwargs, &block)
+    if Puppeteer.env.firefox?
+      if ENV['PENDING_CHECK']
+        # Executed but not marked as failure.
+        # Fails if pass.
+        pending(*args, **kwargs, &block)
+      else
+        # Not executed, just skip.
+        skip(*args, **kwargs, &block)
+      end
+    else
+      it(*args, **kwargs, &block)
     end
   end
 end
+
+RSpec::Core::ExampleGroup.extend(ItFailsFirefox)
+
+require_relative './golden_matcher'
+require_relative './utils'
